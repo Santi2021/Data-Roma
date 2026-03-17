@@ -249,9 +249,9 @@ elif nav == "🏆 Superinvestors":
         display_df = display_df[display_df["name"].str.contains(search, case=False, na=False)]
 
     st.dataframe(
-        display_df[["name", "portfolio_value", "num_stocks", "turnover"]].rename(columns={
+        display_df[["name", "portfolio_value", "num_stocks"]].rename(columns={
             "name": "MANAGER", "portfolio_value": "PORTFOLIO VALUE",
-            "num_stocks": "# STOCKS", "turnover": "TURNOVER"}),
+            "num_stocks": "# STOCKS"}),
         use_container_width=True, height=520, hide_index=True)
 
 
@@ -561,3 +561,4 @@ elif nav == "📊 Aggregate Intelligence":
                 "ticker":"TICKER","company":"COMPANY","num_managers":"# MANAGERS",
                 "managers":"HELD BY","avg_pct_portfolio":"AVG % PORT","total_value_000":"TOTAL VALUE ($K)"}),
             use_container_width=True, height=520, hide_index=True)
+# This will be appended - ignore, we need a separate debug snippet
