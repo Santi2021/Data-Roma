@@ -10,14 +10,8 @@ HEADERS = {
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/122.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "max-age=0",
 }
 
 BASE_URL = "https://www.dataroma.com/m"
@@ -30,7 +24,6 @@ def get_page(url, retries=3, delay=2.0):
         time.sleep(0.5)
     except Exception:
         pass
-
     for i in range(retries):
         try:
             r = session.get(url, headers=HEADERS, timeout=20)
@@ -38,9 +31,9 @@ def get_page(url, retries=3, delay=2.0):
             time.sleep(delay)
             return r.text, None
         except requests.exceptions.HTTPError as e:
-            status = getattr(r, 'status_code', 0)
+            status = getattr(r, "status_code", 0)
             if status == 403:
-                return None, f"403 Forbidden — DataRoma is blocking this IP/request"
+                return None, "403 Forbidden — DataRoma is blocking this IP"
             if i == retries - 1:
                 return None, f"HTTP error: {e}"
             time.sleep(delay * 2)
@@ -53,6 +46,11 @@ def get_page(url, retries=3, delay=2.0):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_superinvestors():
+    """
+    Scrape managers from managers.php.
+    Table id="grid", columns: td.man (name+link), td.val (portfolio value), td.cnt (# stocks)
+    Holdings URL: /m/holdings.php?m=<id>  (e.g. ?m=AKO, ?m=BRK)
+    """
     url = f"{BASE_URL}/managers.php"
     html, err = get_page(url)
     if err:
@@ -61,46 +59,50 @@ def get_superinvestors():
     soup = BeautifulSoup(html, "html.parser")
     managers = []
 
-    table = soup.find("table", {"id": "grid"}) or soup.find("table")
+    table = soup.find("table", {"id": "grid"})
     if not table:
-        return pd.DataFrame(), "Could not find manager table on DataRoma page"
+        return pd.DataFrame(), "Could not find table#grid on managers.php"
 
-    rows = table.find_all("tr")[1:]
+    rows = table.find_all("tr")
     for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 2:
+        # Manager name is in td.man
+        man_td = row.find("td", class_="man")
+        if not man_td:
             continue
-        link = cols[0].find("a")
+        link = man_td.find("a", href=True)
         if not link:
             continue
 
         href = link.get("href", "")
-        m_id_match = re.search(r"[?&]f=([^&]+)", href)
-        manager_id = m_id_match.group(1) if m_id_match else ""
-        name = cols[0].get_text(strip=True)
-        portfolio_val = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-        num_stocks = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-        turnover = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+        # Extract ?m=XXX
+        m = re.search(r"[?&]m=([^&]+)", href)
+        if not m:
+            continue
+        manager_id = m.group(1)
+        name = link.get_text(strip=True)
 
-        if name and manager_id:
-            managers.append({
-                "id": manager_id,
-                "name": name,
-                "portfolio_value": portfolio_val,
-                "num_stocks": num_stocks,
-                "turnover": turnover,
-                "href": href,
-            })
+        val_td = row.find("td", class_="val")
+        cnt_td = row.find("td", class_="cnt")
+        portfolio_val = val_td.get_text(strip=True) if val_td else ""
+        num_stocks = cnt_td.get_text(strip=True) if cnt_td else ""
+
+        managers.append({
+            "id": manager_id,
+            "name": name,
+            "portfolio_value": portfolio_val,
+            "num_stocks": num_stocks,
+        })
 
     if not managers:
-        return pd.DataFrame(), "Parsed page but found 0 managers"
+        return pd.DataFrame(), "Parsed managers.php but found 0 rows"
 
     return pd.DataFrame(managers), None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_portfolio(manager_id: str, manager_name: str = ""):
-    url = f"{BASE_URL}/holdings.php?f={manager_id}&v=o"
+    """Holdings URL: /m/holdings.php?m=<id>"""
+    url = f"{BASE_URL}/holdings.php?m={manager_id}"
     html, err = get_page(url)
     if err:
         return pd.DataFrame(), err
@@ -110,23 +112,22 @@ def get_portfolio(manager_id: str, manager_name: str = ""):
 
     table = soup.find("table", {"id": "grid"}) or soup.find("table")
     if not table:
-        page_text = soup.get_text()[:300].strip()
-        return pd.DataFrame(), f"No table found. Page: {page_text[:200]}"
+        snippet = soup.get_text()[:300].strip()
+        return pd.DataFrame(), f"No table found. Page snippet: {snippet[:200]}"
 
     rows = table.find_all("tr")[1:]
     for row in rows:
         cols = row.find_all("td")
         if len(cols) < 4:
             continue
-
         ticker_el = cols[0].find("a")
-        ticker = ticker_el.get_text(strip=True) if ticker_el else cols[0].get_text(strip=True)
-        company = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+        ticker        = ticker_el.get_text(strip=True) if ticker_el else cols[0].get_text(strip=True)
+        company       = cols[1].get_text(strip=True) if len(cols) > 1 else ""
         pct_portfolio = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-        shares = cols[3].get_text(strip=True) if len(cols) > 3 else ""
-        reported_price = cols[4].get_text(strip=True) if len(cols) > 4 else ""
-        value = cols[5].get_text(strip=True) if len(cols) > 5 else ""
-        activity = cols[6].get_text(strip=True) if len(cols) > 6 else ""
+        shares        = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+        reported_price= cols[4].get_text(strip=True) if len(cols) > 4 else ""
+        value         = cols[5].get_text(strip=True) if len(cols) > 5 else ""
+        activity      = cols[6].get_text(strip=True) if len(cols) > 6 else ""
 
         if ticker:
             holdings.append({
@@ -142,15 +143,16 @@ def get_portfolio(manager_id: str, manager_name: str = ""):
             })
 
     if not holdings:
-        page_text = soup.get_text()[:200].strip()
-        return pd.DataFrame(), f"Table found but 0 rows. Page snippet: {page_text}"
+        snippet = soup.get_text()[:200].strip()
+        return pd.DataFrame(), f"Table found but 0 rows. Snippet: {snippet}"
 
     return pd.DataFrame(holdings), None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_recent_activity():
-    url = f"{BASE_URL}/activity.php"
+    """Activity page: /m/allact.php?typ=a"""
+    url = f"{BASE_URL}/allact.php?typ=a"
     html, err = get_page(url)
     if err:
         return pd.DataFrame(), err
@@ -162,32 +164,43 @@ def get_recent_activity():
     if not table:
         return pd.DataFrame(), "No activity table found"
 
-    rows = table.find_all("tr")[1:]
+    # Activity table: td.firm (manager), td.period, then td.sym (tickers with class buy/sell)
+    rows = table.find_all("tr")
     for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 5:
+        firm_td = row.find("td", class_="firm")
+        if not firm_td:
             continue
+        manager = firm_td.get_text(strip=True)
+        period_td = row.find("td", class_="period")
+        period = period_td.get_text(strip=True) if period_td else ""
 
-        manager = cols[0].get_text(strip=True)
-        ticker_el = cols[1].find("a")
-        ticker = ticker_el.get_text(strip=True) if ticker_el else cols[1].get_text(strip=True)
-        company = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-        action = cols[3].get_text(strip=True) if len(cols) > 3 else ""
-        pct_change = cols[4].get_text(strip=True) if len(cols) > 4 else ""
-        date_reported = cols[5].get_text(strip=True) if len(cols) > 5 else ""
+        # Each td.sym has an <a class="buy"> or <a class="sell">
+        sym_tds = row.find_all("td", class_="sym")
+        for sym_td in sym_tds:
+            a = sym_td.find("a")
+            if not a:
+                continue
+            ticker = a.get_text(strip=True)
+            action_class = a.get("class", [""])[0]  # "buy" or "sell"
+            # Tooltip div has: Company\nAction\nChange to portfolio: X%
+            tooltip = sym_td.find("div")
+            lines = [l.strip() for l in tooltip.get_text("\n").split("\n") if l.strip()] if tooltip else []
+            company = lines[0] if len(lines) > 0 else ""
+            action  = lines[1] if len(lines) > 1 else action_class
+            pct_change = lines[2].replace("Change to portfolio:", "").strip() if len(lines) > 2 else ""
 
-        if ticker:
             activity.append({
                 "manager": manager,
+                "period": period,
                 "ticker": ticker,
                 "company": company,
                 "action": action,
                 "pct_change": pct_change,
-                "date_reported": date_reported,
+                "side": "BUY" if action_class == "buy" else "SELL",
             })
 
     if not activity:
-        return pd.DataFrame(), "Activity table found but 0 rows"
+        return pd.DataFrame(), "Activity table found but 0 rows parsed"
 
     return pd.DataFrame(activity), None
 
@@ -196,7 +209,6 @@ def get_recent_activity():
 def get_aggregated_holdings(manager_ids: list, manager_names: dict):
     all_holdings = []
     errors = {}
-
     for mid in manager_ids:
         name = manager_names.get(mid, mid)
         df, err = get_portfolio(mid, name)
@@ -204,8 +216,6 @@ def get_aggregated_holdings(manager_ids: list, manager_names: dict):
             errors[name] = err
         elif not df.empty:
             all_holdings.append(df)
-
     if not all_holdings:
         return pd.DataFrame(), errors
-
     return pd.concat(all_holdings, ignore_index=True), errors
